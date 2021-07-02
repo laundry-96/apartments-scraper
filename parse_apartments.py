@@ -9,6 +9,7 @@ import os
 import time
 import platform
 from bs4 import BeautifulSoup
+import bs4
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
 
@@ -17,6 +18,21 @@ try:
     import configparser
 except ImportError:
     import ConfigParser as configparser
+
+def create_json(urls, map_info):
+    listings = get_data(urls, map_info)
+
+    for item in listings:
+        for k,v in item.items():
+            print(type(k))
+            print(k)
+            print(type(v))
+            print(v)
+    
+
+    out_file = open("output.json", "w")
+    json_listings = json.dump(listings, out_file, indent = 4)
+    out_file.close()
 
 def create_csv(search_urls, map_info, fname, pscores):
     """Create a CSV file with information that can be imported into ideal-engine"""
@@ -36,8 +52,8 @@ def create_csv(search_urls, map_info, fname, pscores):
         writer = csv.writer(csv_file)
         # this is the header (make sure it matches with the fields in
         # write_parsed_to_csv)
-        header = ['Option Name', 'Contact', 'Address', 'Size',
-                  'Rent', 'Monthly Fees', 'One Time Fees',
+        header = ['Option Name', 'Contact', 'Address', 'Room Info'
+                  'Monthly Fees', 'One Time Fees',
                   'Pet Policy', 'Distance', 'Duration',
                   'Parking', 'Gym', 'Kitchen',
                   'Amenities', 'Features', 'Living Space',
@@ -62,45 +78,92 @@ def create_csv(search_urls, map_info, fname, pscores):
     finally:
         csv_file.close()
 
+def get_data(urls, map_info):
 
-def write_parsed_to_csv(page_url, map_info, writer, pscores, page_number = 2, web_driver = None):
-    """Given the current page URL, extract the information from each apartment in the list"""
+    listings = []
 
-    # We start on page_number = 2, since we will already be parsing page_number 1
+    for url in urls:
 
-    # if we are loading the page for the first time, we want to initailize the web driver
-    if(web_driver != None):
-        driver = web_driver
-    else:
         options = Options()
         options.headless = True
         if ('debian' in platform.platform()):
             driver = webdriver.Firefox(firefox_binary='/usr/bin/firefox-esr', options=options)
         else:
             driver = webdriver.Firefox(options=options)
-        driver.get(page_url)
 
-    # read the current page
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
- 
-    # soupify the current page
-    soup.prettify()
-    # only look in this region
-    soup = soup.find('div', class_='placardContainer')
+        driver.get(url)
+        time.sleep(0.25)        
+        read_all_pages = False
+        page_number = 1
 
-    # append the current apartments to the list
+        while not read_all_pages:
+            print("Currently reading page " + str(page_number))
+
+            # read the current page
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+            # soupify the current page
+            soup.prettify()
+            # only look in this region
+            soup = soup.find('div', class_='placardContainer')
+
+            if soup == None:
+                print("ERR: Soup is NONE")
+                continue
+
+            placard_count = 1
+            # append the current apartments to the list of this page
+            for item in soup.find_all('article', class_='placard'):
+                print("Placard #" + str(placard_count))
+                placard_count += 1
+                url = ''
+                contact = ''
+
+                if item.find('a', class_='placardTitle') is None: continue
+                url = item.find('a', class_='placardTitle').get('href')
+
+                # get the phone number and parse it to unicode
+                obj = item.find('div', class_='phone')
+                if obj is not None:
+                    contact = obj.getText().strip()
+
+
+                # get the other fields to write to the CSV
+                fields = parse_apartment_information(url, map_info)
+
+                fields['url'] = url
+                fields['contact'] = contact
+
+                listings.append(fields)
+
+            page_number += 1
+            page_number_str = str(page_number)
+
+            # check for our next page number
+            try:
+                print("Looking for page number " + page_number_str)
+                page_number_element = driver.find_element_by_xpath("//a[@data-page='" + page_number_str + "']")
+                page_number_element.click()
+                time.sleep(0.25)
+            except:
+                driver.quit()
+                read_all_pages = True
+
+    return listings
+
+def write_parsed_to_csv(page_url, map_info, writer, pscores, page_number = 2, web_driver = None):
+    """Given the current page URL, extract the information from each entry in the list"""
+
+    # We start on page_number = 2, since we will already be parsing page_number 1
+
+
+    # append the current apartments to the list of this page
     for item in soup.find_all('article', class_='placard'):
         url = ''
-        rent = ''
         contact = ''
 
         if item.find('a', class_='placardTitle') is None: continue
         url = item.find('a', class_='placardTitle').get('href')
-
-        # get the rent and parse it to unicode
-        obj = item.find('span', class_='altRentDisplay')
-        if obj is not None:
-            rent = obj.getText().strip()
 
         # get the phone number and parse it to unicode
         obj = item.find('div', class_='phone')
@@ -114,10 +177,11 @@ def write_parsed_to_csv(page_url, map_info, writer, pscores, page_number = 2, we
         fields['name'] = '[' + str(fields['name']) + '](' + url + ')'
         fields['address'] = '[' + fields['address'] + '](' + fields['map'] + ')'
 
+
         # fill out the CSV file
         row = [fields['name'], contact,
-               fields['address'], fields['size'],
-               rent, fields['monthFees'], fields['onceFees'],
+               fields['address'], fields['room_info'],
+               fields['onceFees'], fields['monthFees'],
                fields['petPolicy'], fields['distance'], fields['duration'],
                fields['parking'], fields['gym'], fields['kitchen'],
                fields['amenities'], fields['features'], fields['space'],
@@ -133,12 +197,14 @@ def write_parsed_to_csv(page_url, map_info, writer, pscores, page_number = 2, we
         writer.writerow(row)
 
     page_number_str = str(page_number)
-    
+
     # check for our next page number
     try:
+        print("Looking for page number " + page_number_str)
         page_number_element = driver.find_element_by_xpath("//a[@data-page='" + page_number_str + "']")
         page_number_element.click()
-        time.sleep(1)
+        time.sleep(0.25)
+
     # we will get a no element found exception, meaning our search has come to an end
     except:
         driver.quit()
@@ -150,6 +216,7 @@ def write_parsed_to_csv(page_url, map_info, writer, pscores, page_number = 2, we
 
 def parse_apartment_information(url, map_info):
     """For every apartment page, populate the required fields to be written to CSV"""
+    print("Getting apartment info from: " + url)
 
     # read the current page
     headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36'}
@@ -168,8 +235,7 @@ def parse_apartment_information(url, map_info):
     # get the address of the property
     get_property_address(soup, fields)
 
-    # get the size of the property
-    get_property_size(soup, fields)
+    get_property_room_info(soup, fields)
 
     # get the one time and monthly fees
     get_fees(soup, fields)
@@ -274,19 +340,52 @@ def get_description(soup, fields):
     if obj is not None:
         fields['description'] = prettify_text(obj.getText())
 
-def get_property_size(soup, fields):
+def get_property_room_info(soup, fields):
     """Given a beautifulSoup parsed page, extract the property size of the first one bedroom"""
     #note: this might be wrong if there are multiple matches!!!
 
-    fields['size'] = ''
+    fields['room_info'] = []
 
     if soup is None: return
-    
-    obj = soup.find('tr', {'data-beds': '1'})
-    if obj is not None:
-        data = obj.find('td', class_='sqft').getText()
-        data = prettify_text(data)
-        fields['size'] = data
+
+    room_availability_table = soup.find('section', {'id': 'availabilitySection'})
+    raw_room_table = soup.find('tbody').find_all('tr')
+
+    room_info = []
+
+    for row in raw_room_table[1:]:
+        # If we can't find proper bed data, so most likely the row isn't real data, so let's continue
+        try: 
+            row.find('td', class_="beds") 
+        except:
+            continue
+
+        room_type_long = row.find('td', class_="beds").find('span', class_='longText').text.replace('BR', 'Bedroom').strip()
+        bath_type_long = row.find('td', class_='baths').find('span', class_='longText').text.strip()
+        rent = row.find('td', class_='rent').text.strip()
+        if 'call' in rent.lower():
+            continue
+        unit = row.find('td', class_='unit').text.strip()
+        size = row.find('td', class_='sqft').text.strip()
+        if(' ' in unit):
+            unit = None
+        room_info.append((room_type_long, bath_type_long, rent, unit, size))
+
+    fields['room_info'] = room_info
+
+def get_property_size(soup, fields):
+    return
+
+
+    #raw_room_table.asdfasdf()
+    #print(str(raw_room_table.encode('utf-8')))
+    #print(next(raw_room_table.descendants))
+
+#    if raw_room_table is not None:
+
+#        data = obj.find('td', class_='sqft').getText()
+#        data = prettify_text(data)
+#        fields['size'] = data
 
 
 def get_features_and_info(soup, fields):
@@ -294,37 +393,63 @@ def get_features_and_info(soup, fields):
 
     fields['features'] = ''
     fields['info'] = ''
+    
+    feats = []
+    info = []
 
     if soup is None: return
     
     obj = soup.find('i', class_='propertyIcon')
-
     if obj is not None:
-        for obj in soup.find_all('i', class_='propertyIcon'):
-            data = obj.parent.findNext('ul').getText()
-            data = prettify_text(data)
+        data = obj.parent.findNext('ul')
+        for obj in soup.find_all('li'):
+            item = str(list(obj)[-1].encode('latin-1', 'ignore').decode('latin-1'))
 
-            if obj.parent.findNext('h3').getText().strip() == 'Features':
-                # format it nicely: remove trailing spaces
-                fields['features'] = data
-            if obj.parent.findNext('h3').getText() == 'Property Information':
-                # format it nicely: remove trailing spaces
-                fields['info'] = data
+            if(obj.parent.findNext('h3').getText().strip() == 'Features'):
+                feats.append(item)
 
+            if(obj.parent.findNext('h3').getText().strip() == 'Property Information'):
+                info.append(item)
+
+        fields['features'] = feats
+        fields['info'] = info
+
+
+    """
+        obj = soup.find('i', class_='propertyIcon')
+
+        if obj is not None:
+            for obj in soup.find_all('i', class_='propertyIcon'):
+                data = obj.parent.findNext('ul').getText()
+                data = prettify_text(data)
+
+                print(data)
+
+                if obj.parent.findNext('h3').getText().strip() == 'Features':
+                    # format it nicely: remove trailing spaces
+                    fields['features'] = data
+                if obj.parent.findNext('h3').getText() == 'Property Information':
+                    # format it nicely: remove trailing spaces
+                    fields['info'] = data
+    """
 
 def get_field_based_on_class(soup, field, icon, fields):
     """Given a beautifulSoup parsed page, extract the specified field based on the icon"""
 
     fields[field] = ''
 
+    items = []
+
     if soup is None: return
-    
+
     obj = soup.find('i', class_=icon)
     if obj is not None:
-        data = obj.parent.findNext('ul').getText()
-        data = prettify_text(data)
+        data = obj.parent.findNext('ul')
+        for obj in soup.find_all('li'):
+            item = str(list(obj)[-1].encode('latin-1', 'ignore').decode('latin-1'))
+            items.append(item)
 
-        fields[field] = data
+        fields[field] = item
 
 
 def get_parking_info(soup, fields):
@@ -333,7 +458,7 @@ def get_parking_info(soup, fields):
     fields['parking'] = ''
 
     if soup is None: return
-    
+
     obj = soup.find('div', class_='parkingDetails')
     if obj is not None:
         data = obj.getText()
@@ -348,7 +473,7 @@ def get_pet_policy(soup, fields):
     if soup is None:
         fields['petPolicy'] = ''
         return
-    
+
     # the pet policy
     data = soup.find('div', class_='petPolicyDetails')
     if data is None:
@@ -371,26 +496,22 @@ def get_fees(soup, fields):
 
     obj = soup.find('div', class_='monthlyFees')
     if obj is not None:
-        for expense in obj.find_all('div', class_='fee'):
-            description = expense.find(
-                'div', class_='descriptionWrapper').getText()
-            description = prettify_text(description)
+        for expense in obj.find_all('div', class_='descriptionWrapper'):
+            expenses = expense.find_all('span')
+            description = expenses[0].getText()
 
-            price = expense.find('div', class_='priceWrapper').getText()
-            price = prettify_text(price)
+            price = expenses[1].getText()
 
             fields['monthFees'] += '* ' + description + ': ' + price + '\n'
 
     # get one time fees
     obj = soup.find('div', class_='oneTimeFees')
     if obj is not None:
-        for expense in obj.find_all('div', class_='fee'):
-            description = expense.find(
-                'div', class_='descriptionWrapper').getText()
-            description = prettify_text(description)
+        for expense in obj.find_all('div', class_='descriptionWrapper'):
+            expenses = expense.find_all('span')
+            description = expenses[0].getText()
 
-            price = expense.find('div', class_='priceWrapper').getText()
-            price = prettify_text(price)
+            price = expenses[1].getText()
 
             fields['onceFees'] += '* ' + description + ': ' + price + '\n'
 
@@ -414,7 +535,7 @@ def get_distance_duration(map_info, fields):
 
     # populate the distance / duration fields for morning
     travel_morning = get_travel_time(map_url)
-    
+
     # coming back from work in the evening
     origin = fields['address'].replace(' ', '+')
     destination = map_info['target_address'].replace(' ', '+')
@@ -448,7 +569,7 @@ def get_travel_time(map_url):
 
     # read and parse the google maps distance / duration from the api
     response = requests.get(map_url).json()
-    
+
     # the status might not be OK, ignore this in that case
     if response['status'] == 'OK':
         response = response['rows'][0]['elements'][0]
@@ -469,8 +590,7 @@ def get_property_name(soup, fields):
     # get the name of the property
     obj = soup.find('h1', class_='propertyName')
     if obj is not None:
-        name = obj.getText()
-        name = prettify_text(name)
+        name = obj.getText().encode('latin-1', 'ignore').decode('latin-1')
         fields['name'] = name
 
 def find_addr(script, tag):
@@ -484,22 +604,22 @@ def find_addr(script, tag):
 def get_property_address(soup, fields):
     """Given a beautifulSoup parsed page, extract the full address of the property"""
 
-    address = ""
+    property_address_div = soup.find('div', class_="propertyAddress").find('h2').find_all('span')
 
-    # They changed how this works so I need to grab the script
-    script = soup.findAll('script', type='text/javascript')[2].text
-    
-    # The address is everything in quotes after listingAddress
-    address = find_addr(script, "listingAddress")
+    if len(property_address_div) < 4:
+        print("There is less than 4 pieces of address information... Most likely a bad address, so we won't include")
+        fields['address'] = "Not Enough Addr Info to Parse"
+        return
 
-    # City
-    address += ", " + find_addr(script, "listingCity")
+    if len(property_address_div) > 5:
+        print("There is more than 4 pieces of address information... Possibly an edge case, so this must be reviewed")
+        fields['address'] = "Too Much Addr Info to Parse"
+        return
 
-    # State
-    address += ", " + find_addr(script, "listingState")
-
-    # Zip Code
-    address += " " + find_addr(script, "listingZip")
+    address = property_address_div[0].text.strip() + ", " + \
+            property_address_div[1].text.strip() + ", " + \
+            property_address_div[2].text.strip() + " " + \
+            property_address_div[3].text.strip()
 
     fields['address'] = address
 
@@ -566,7 +686,9 @@ def main():
         map_info['maps_url'] += 'units=' + units + '&mode=' + mode + \
             '&transit_routing_preference=' + routing + '&key=' + google_api_key
 
-    create_csv(urls, map_info, fname, pscores)
+    #create_csv(urls, map_info, fname, pscores)
+
+    create_json(urls, map_info)
 
 
 if __name__ == '__main__':
